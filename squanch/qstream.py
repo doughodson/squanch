@@ -1,13 +1,14 @@
 import ctypes
+from multiprocessing import sharedctypes,Lock
+
 import numpy as np
-from multiprocessing import sharedctypes
 
 from squanch import qubit, linalg
 
 __all__ = ["QStream"]
 
 
-def zero_state(system_size, num_systems, use_density_matrix = True):
+def zero_state(system_size, num_systems):
     '''
     Generate an array representing the num_systems Hilbert spaces in the state ``|0>...|0><0|...<0|``
 
@@ -17,10 +18,7 @@ def zero_state(system_size, num_systems, use_density_matrix = True):
     '''
     # Initialize each qubit state
     zero = np.array([1, 0], dtype = np.complex64)  # vector representation of the |0> pure state
-    if use_density_matrix:
-        initial_qubit_state = np.outer(zero, zero)  # each qubit is initialized as |0><0|
-    else:
-        initial_qubit_state = np.copy(zero)
+    initial_qubit_state = np.outer(zero, zero)  # each qubit is initialized as |0><0|
     initial_system_state = np.array([], dtype = np.complex64)
     # Generate the matrix representation of the initial state of the n-qubit system
     for _ in range(system_size):
@@ -35,12 +33,13 @@ class QStream:
     ``QSystem``s and ``Qubit``s can be instantiated from the ``state`` of this class.
     '''
 
-    def __init__(self, system_size, num_systems, array = None, agent = None, use_density_matrix = True):
+    def __init__(self, system_size, num_systems, lock = None, array = None, agent = None):
         '''
         Instantiate the quantum datastream object
 
         :param int system_size: number of entangled qubits in each quantum system; each system has dims 2^system_size
         :param int num_systems: number of small quantum systems in the data stream
+        :param Lock lock: multiprocessing lock for atomic state updates.
         :param np.array array: pre-allocated array in memory for purposes of sharing QStreams in multiprocessing
         :param Agent agent: optional reference to the Agent owning the qstream; useful for progress monitoring across
                             separate processes
@@ -48,7 +47,10 @@ class QStream:
         self.system_size = system_size  # number of qubits per system
         self.num_systems = num_systems  # number of disjoint quantum subsystems
         self.agent = agent
-        self.use_density_matrix = use_density_matrix
+        if lock is not None:
+          self.lock = lock
+        else:
+          self.lock = Lock()
         # Generate the matrix representation of the overall state of the quantum stream
         if array is not None:
             self.state = array
@@ -77,7 +79,7 @@ class QStream:
         return self.num_systems
 
     @classmethod
-    def from_array(cls, array, reformat = False, agent = None, use_density_matrix = True):
+    def from_array(cls, array, lock, reformat = False, agent = None):
         '''
         Instantiates a quantum datastream object from an existing state array
 
@@ -87,13 +89,13 @@ class QStream:
         '''
         num_systems = array.shape[0]
         system_size = int(np.log2(array.shape[1]))
-        qstream = cls(system_size, num_systems, array = array, agent = agent, use_density_matrix = use_density_matrix)
+        qstream = cls(system_size, num_systems, lock = lock, array = array, agent = agent)
         if reformat:
-            qstream.reformat(qstream.state, use_density_matrix = use_density_matrix)
+            qstream.reformat(qstream.state)
         return qstream
 
     @staticmethod
-    def reformat(array, use_density_matrix = True):
+    def reformat(array):
         '''
         Reformats a Hilbert space array in-place to the all-zero state
 
@@ -101,10 +103,10 @@ class QStream:
         '''
         num_systems = array.shape[0]
         system_size = int(np.log2(array.shape[1]))
-        array[...] = zero_state(system_size, num_systems, use_density_matrix = use_density_matrix)
+        array[...] = zero_state(system_size, num_systems)
 
     @staticmethod
-    def shared_hilbert_space(system_size, num_systems, use_density_matrix = True):
+    def shared_hilbert_space(system_size, num_systems):
         '''
         Allocate a portion of shareable c-type memory to create a numpy array that is sharable between processes
 
@@ -113,12 +115,8 @@ class QStream:
         :return: a blank, sharable, num_systems * 2^system_size * 2^system_size array of np.complex64 values
         '''
         dim = 2 ** system_size
-        if use_density_matrix:
-            mallocced = sharedctypes.RawArray(ctypes.c_double, num_systems * dim * dim)
-            array = np.frombuffer(mallocced, dtype = np.complex64).reshape((num_systems, dim, dim))
-        else:
-            mallocced = sharedctypes.RawArray(ctypes.c_double, num_systems * dim)
-            array = np.frombuffer(mallocced, dtype = np.complex64).reshape((num_systems, dim))
+        mallocced = sharedctypes.RawArray(ctypes.c_double, num_systems * dim * dim)
+        array = np.frombuffer(mallocced, dtype = np.complex64).reshape((num_systems, dim, dim))
         QStream.reformat(array)
         return array
 
@@ -129,7 +127,7 @@ class QStream:
         :param int index: zero-index of the quantum system to access
         :return: the quantum system
         '''
-        return qubit.QSystem.from_stream(self, index, use_density_matrix = self.use_density_matrix)
+        return qubit.QSystem.from_stream(self, index)
 
     def next(self):
         '''
